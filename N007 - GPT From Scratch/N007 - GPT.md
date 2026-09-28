@@ -1376,9 +1376,9 @@ class LayerNorm:
 torch.manual_seed(1337)
 module = LayerNorm(100)
 x = torch.randn(32, 100)           # 批次大小 32，100 个特征（100 维向量）
-print(x[0,:].mean(), x[0,:].std()) # 跨批次看第一个特征的旧均值和标准差（非 0 和 1）
+print(x[0,:].mean(), x[0,:].std()) # 第一个样本、跨特征的旧均值和标准差（非 0 和 1）
 x = module(x)                      # 前向传播
-print(x[0,:].mean(), x[0,:].std()) # 跨批次看第一个特征的新均值和标准差（应为 0 和 1）
+print(x[0,:].mean(), x[0,:].std()) # 第一个样本、跨特征的新均值和标准差（应为 0 和 1）
 print(x[0,:5])                     # 看看特征如何"按样本、跨特征"地指示归一化，而非"按特征、跨批次"
 print(x.shape)                     # 输出形状应与输入形状相同
 ```
