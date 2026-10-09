@@ -17,6 +17,10 @@ class GPTConfig:
     n_head: int = 12        # number of heads
     n_embd: int = 768       # embedding dimension
 
+# 因果(Causal)自注意力：每个位置只能 attend 到自身及之前的 token，不能看未来
+# 实现手段是第 32 行注册的下三角掩码 bias + 第 47 行 masked_fill 把上三角屏蔽成 -inf
+# softmax 后未来位置权重归零，位置 t 的输出只由 j<=t 的 value 加权得到 —— 因果性由此保证
+# 这是 GPT(自回归LM)区别于 BERT(双向) 的根本所在；Transformer 原论文里叫 Masked Self-Attention
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -44,6 +48,7 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         # attention (materializes the large (T,T) matrix for all the queries and keys)
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
+        # 因果掩码：用下三角 bias 把上三角（未来位置）的注意力分数置为 -inf，softmax 后归零，禁止关注未来 token
         att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
         att = F.softmax(att, dim=-1)
         y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -127,9 +132,12 @@ class GPT(nn.Module):
         # create a from-scratch initialized minGPT model
         config = GPTConfig(**config_args)
         model = GPT(config)
-        sd = model.state_dict()
+        sd = model.state_dict()  # 把模型里所有可学习参数和 buffer 映射成 {名字: 张量} 的字典
         sd_keys = sd.keys()
-        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
+        # .attn.bias 实为 register_buffer 注册的因果掩码(下三角)，非可学习参数
+        # 两端各自用 tril 生成、形状确定，故无需从 HF 搬运
+        # 剔除后 key 数才能与 HF 对齐，通过下方 len(sd_keys_hf) == len(sd_keys) 的 assert
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')]
 
         # init a HuggingFace/Transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
@@ -142,10 +150,16 @@ class GPT(nn.Module):
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the OpenAI checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
+        # OpenAI 的 checkpoint 用 HF 的 Conv1D 存权重(做 y = x @ W，形状 [in, out])
+        # 而本模型用标准 nn.Linear(做 y = x @ W^T，权重形状 [out, in])
+        # 两者存储方向正好相反，故导入这 4 类权重时需 .t() 转置
         assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
+                # [::-1] 是 Python 切片语法，第三个数 step=-1 表示"反向遍历"
+                # 作用在 shape 元组上即整体翻转，等价于 .reverse() 但返回新元组
+                # 此处把 HF 权重的 [in, out] 翻转成 [out, in]，与本模型 Linear 权重形状比对一致才放行
                 assert sd_hf[k].shape[::-1] == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k].t())
@@ -184,8 +198,8 @@ tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
 x = tokens.to(device)
 
 # generate! right now x is (B, T) where B = 5, T = 8
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+# torch.manual_seed(42)
+# torch.cuda.manual_seed(42)
 
 while x.size(1) < max_length:
     # forward the model to get the logits
